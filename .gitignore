@@ -1,0 +1,26 @@
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+.env
+.env.local
+logs/*.log
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.ty_cache/
+htmlcov/
+.coverage
+*.png
+*.jpg
+*.jpeg
+*.webp
+
+# Sibling agent sessions use `git worktree add .worktrees/<slug>` (the hot-repo
+# convention in the parent CLAUDE.md). Untracked, these are embedded git
+# repositories, so a `git add -A` stages ANOTHER session's worktree gitlinks —
+# and any file they have mid-edit — into your commit. Observed 2026-08-04 in
+# video_analyzer_service; 11 of 19 w2v repos lacked this rule, all 19 had a
+# worktree on disk.
+.worktrees/

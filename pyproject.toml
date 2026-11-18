@@ -1,0 +1,141 @@
+[project]
+license = "Apache-2.0"
+name = "image-gen-backend"
+version = "0.1.0"
+description = "Image generation backend for Apple Silicon — FLUX via mflux (mlx-flux)"
+requires-python = ">=3.14"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    "pydantic>=2.9.0",
+    "pydantic-settings>=2.14.2",  # GHSA-4xgf-cpjx-pc3j fixed in 2.14.2
+    "python-dotenv>=1.0.0",
+    "psutil>=6.0.0",
+    "prometheus-fastapi-instrumentator>=7.0.0",
+    # Imported DIRECTLY by src/services/flux_service.py (the
+    # image_gen_upscale_failures_total Counter), so it is declared rather than
+    # relied on as prometheus-fastapi-instrumentator's transitive. Same
+    # reasoning as the floors below: the lock already resolves 0.25.0, but a
+    # lock is a point-in-time resolution — only a declared requirement stops a
+    # future re-resolve (or an instrumentator release that drops the dep) from
+    # turning a direct import into an ImportError at startup.
+    "prometheus-client>=0.21.0",
+    "Pillow>=13.0.0",
+    "httpx>=0.28.1",
+    "structlog>=24.4.0",
+    "redis>=7.3.0",
+    # Shared auth middleware (license-token introspect + trusted-network identity)
+    # so mflux GPU usage is attributed to the real tenant for cost metering.
+    # Floor raised 0.67.0 -> 0.76.2 for the entitlement gate mounted on
+    # src/routers/image_routes.py. Measured against the w2v_common history
+    # rather than bumped to match the fleet:
+    #   0.75.0 (450497b) — where ``LICENSE_GATE`` / ``require_license`` /
+    #     ``license_gate_enabled`` / ``is_license_exempt_path`` first exist. The
+    #     installed 0.70.0 has NO auth/entitlement module at all, so the import
+    #     would ImportError at startup. 0.75.0 is the bare symbol floor.
+    #   0.76.0 (812b67e) — REQUIRED, not cosmetic. In 0.75.0 the gate presented
+    #     an opaque licence token to the licenses service, which pins it to the
+    #     caller's OWN tenant; every lookup 403'd, resolved ``unknown`` and
+    #     returned 503 license_unavailable. Armed on 0.75.0 this service would
+    #     503 every request, licensed or not. Also scopes the inactive-state
+    #     refinement by tenant so the 402 reason code is the caller's own.
+    #   0.76.2 (189b15c) — an exempt PREFIX now matches a path SEGMENT rather
+    #     than a raw string prefix. This service is behind the same exemption
+    #     list, so take the fix rather than ship the looser match.
+    # The lock resolves 0.76.5 (current fleet version).
+    "w2v-common>=0.104.0",
+    # Apple-Silicon-only deps (sys_platform-gated so Linux CI / dev boxes can still resolve)
+    "mlx>=0.18.0 ; sys_platform == 'darwin'",
+    "mflux>=0.6.0 ; sys_platform == 'darwin'",
+    # CVE-2026-9856 / GHSA-xrqw-3rrv-vx5w (HIGH, CWE-22): path traversal in
+    # save_pretrained() lets chat_template keys escape the save directory and
+    # write arbitrary files. Affects everything < 5.10.0. Same reasoning as the
+    # cryptography floor below: the lock alone is a point-in-time resolution,
+    # only the declared floor binds a future re-resolve. mflux already requires
+    # transformers >=5.0.0,<6.0, so this floor costs nothing.
+    "transformers>=5.10.0 ; sys_platform == 'darwin'",
+    # PYSEC-2025-194: fixed in torch 2.13.0. torch is not imported by this
+    # service (generation is MLX/mflux); it arrives as a transitive of mflux,
+    # which declares `torch<3.0,>=2.8.0` (python_full_version >= "3.13") — i.e.
+    # NO upper cap that blocks 2.13.0. Verified against the mflux 0.17.5
+    # requires-dist on PyPI, not assumed. Same floor-not-lock reasoning as
+    # cryptography below.
+    #
+    # This floor is COUPLED to the setuptools floor: setuptools is a RUNTIME
+    # dependency of torch (`torch 2.12.0 -> setuptools`), and PYSEC-2026-3447
+    # is only fixed in setuptools 83.0.0. torch 2.13.0 declares
+    # `setuptools>=77.0.3` with no upper bound, so 83+ is legal only once torch
+    # moves. Bumping either alone leaves the pair unresolvable.
+    "torch>=2.13.0 ; sys_platform == 'darwin'",
+    # PYSEC-2026-3447: fixed in setuptools 83.0.0. Reaches this repo only as
+    # torch's runtime dependency (see above) — declared here because the lock
+    # is a point-in-time resolution and only the floor binds a re-resolve.
+    "setuptools>=84.1.0",
+    "numpy>=1.24.0",
+    # --- Security floor on a transitive dependency ---
+    # cryptography is not imported by this service directly; it arrives through
+    # transformers / huggingface-hub and w2v-common. The lock resolves 50.0.0 today, but a lock is a point-in-time
+    # resolution, not a constraint: the next unrelated `uv lock` is free to walk
+    # an undeclared transitive back DOWN, silently, with green CI. The declared
+    # floor is the only thing that binds it.
+    #
+    # CVE-2026-69247 (GHSA-g6cj-pr64-35w5) was introduced in 44.0.0 and fixed in
+    # 50.0.0, so anything in [44.0.0, 50.0.0) is affected. Matches the floor
+    # analysis_service (#175/#176) records for the same CVE.
+    #
+    # No aiohttp floor here on purpose: this repo resolves no aiohttp at all
+    # (`grep -c 'name = "aiohttp"' uv.lock` -> 0). Only declare floors for
+    # packages the repo actually resolves.
+    "cryptography>=50.0.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3.0",
+    "pytest-asyncio>=0.24.0",
+    "httpx>=0.28.1",
+    "ruff>=0.7.0",
+    "ty>=0.0.1a13",
+    "pip-audit>=2.7.0",
+]
+
+[tool.uv]
+# w2v-common is published to the in-cluster pypiserver, not PyPI. Every other
+# w2v service declares this; image_gen_backend relied on CI's UV_EXTRA_INDEX_URL
+# env, but this service has NO CI (bare-metal mini1), so `uv lock` off-CI failed
+# to find w2v-common. Declaring it here makes the lock reproducible on-device.
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+packages = {find = {where = ["src"]}}
+
+[build-system]
+requires = ["setuptools>=84.1.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.ruff]
+line-length = 120
+target-version = "py314"
+
+[tool.ruff.lint]
+# ANN401 (bare `Any` in a signature) + TID251 (uuid4 ban) are the w2v typing
+# guardrail. Full `ANN` (annotation completeness) is intentionally NOT enabled
+# here — this service never had annotation linting; ANN401 alone bans bare `Any`
+# (0 offenders today) without a large grandfather sweep.
+select = ["E", "F", "I", "B", "W", "UP", "SIM", "BLE", "ANN401", "TID251"]
+
+# uuid7 is the id standard (stdlib, py3.14). TID251 bans `uuid4`.
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"uuid.uuid4".msg = "uuid7 is the w2v id standard — use uuid.uuid7() (stdlib, py3.14)."
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["TID251"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.uv.sources]
+# The published source tree resolves its shared library from the public
+# repository at the release tag; the private index is not reachable here.
+w2v-common = { git = "https://github.com/nonagenticai/w2v_common", tag = "v0.115.4" }
